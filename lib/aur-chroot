@@ -13,6 +13,7 @@ directory=/var/lib/aurbuild/$machine
 makechrootpkg_args=(-cu)
 makechrootpkg_bindmounts_ro=()
 bindmounts_ro=()
+root_dir=/
 
 # default options
 prepare=1 build=1
@@ -23,14 +24,14 @@ ignore_defaults() {
     } { print }'
 }
 
-host_with_cache() {
+print_cachedir() {
     printf '[%s]\n' options
-    pacman-conf --verbose CacheDir
+    pacini --verbose "$1" CacheDir
+}
 
-    for a in "$@"; do
-        printf '[%s]\n' "$a"
-        pacman-conf --repo "$a"
-    done
+print_section() {
+    printf '[%s]\n' "$2"
+    pacini --section="$2" "$1"
 }
 
 trap_exit() {
@@ -46,8 +47,9 @@ usage() {
 
 source /usr/share/makepkg/util/parseopts.sh
 
-opt_short='d:C:D:M:'
-opt_long=('database' 'directory' 'pacman-conf' 'makepkg-conf' 'no-build' 'no-prepare')
+opt_short='d:C:D:M:R:'
+opt_long=('database' 'directory' 'pacman-conf' 'makepkg-conf'
+          'no-build' 'no-prepare' 'sysroot')
 opt_hidden=('dump-options')
 
 if ! parseopts "$opt_short" "${opt_long[@]}" "${opt_hidden[@]}" -- "$@"; then
@@ -55,14 +57,14 @@ if ! parseopts "$opt_short" "${opt_long[@]}" "${opt_hidden[@]}" -- "$@"; then
 fi
 set -- "${OPTRET[@]}"
 
-# FIXME: add --sysroot to set pacconf host, see pacutils-sysroot(7)
-unset pacman_conf makepkg_conf host_repo server
+unset pacman_conf makepkg_conf host_repo root_dir
 while true; do
     case "$1" in
-        -d|--database) shift; host_repo+=("$1") ;;
-        -D|--directory) shift; directory=$1 ;;
-        -C|--pacman-conf) shift; pacman_conf=$1 ;;
+        -d|--database)     shift; host_repo+=("$1") ;;
+        -D|--directory)    shift; directory=$1 ;;
+        -C|--pacman-conf)  shift; pacman_conf=$1 ;;
         -M|--makepkg-conf) shift; makepkg_conf=$1 ;;
+        -R|--sysroot)      shift; root_dir=$1 ;;
         --no-build)     build=0 ;;
         --no-prepare)   prepare=0 ;;
         --dump-options) printf -- '--%s\n' "${opt_long[@]}" ;
@@ -86,8 +88,16 @@ fi
 pacman_conf=${pacman_conf-/usr/share/devtools/pacman-multilib.conf}
 makepkg_conf=${makepkg_conf-/usr/share/devtools/makepkg-$machine.conf}
 
+# host configuration
+pacconf --sysroot "$root_dir" > "$tmp"/host.conf
+
 # CacheDir will be replaced by devtools (#416)
-host_with_cache "${host_repo[@]}" >"$tmp"/custom.conf
+{ print_cachedir "$tmp"/host.conf
+
+  for repo in "${host_repo[@]}"; do
+      print_section "$tmp"/host.conf "$repo"
+  done
+} > "$tmp"/custom.conf
 
 # bind mount all file:// paths to container (#461)
 while read -r key _ value; do
@@ -100,8 +110,8 @@ done < "$tmp"/custom.conf
 
 if ((prepare)); then
     # do not print DBPath (#412)
-    pacman-conf -c "$pacman_conf" | ignore_defaults \
-        | cat - "$tmp"/custom.conf >"$tmp"/pacman.conf
+    pacconf --config "$pacman_conf" | ignore_defaults \
+        | cat - "$tmp"/custom.conf > "$tmp"/pacman.conf
 
     if [[ -f $directory/root/.arch-chroot ]]; then
         # locking is done by systemd-nspawn
